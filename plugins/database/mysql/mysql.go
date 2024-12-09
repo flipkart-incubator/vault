@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	stdmysql "github.com/go-sql-driver/mysql"
+        "github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/go-secure-stdlib/strutil"
 	dbplugin "github.com/hashicorp/vault/sdk/database/dbplugin/v5"
 	"github.com/hashicorp/vault/sdk/database/helper/dbutil"
@@ -133,8 +134,15 @@ func (m *MySQL) NewUser(ctx context.Context, req dbplugin.NewUserRequest) (dbplu
 		"expiration": expirationStr,
 	}
 
-	if err := m.executePreparedStatementsWithMap(ctx, req.Statements.Commands, queryMap); err != nil {
-		return dbplugin.NewUserResponse{}, err
+	createErr := m.executePreparedStatementsWithMap(ctx, req.Statements.Commands, queryMap)
+	if createErr != nil {
+		if len(req.RollbackStatements.Commands) != 0 {
+			rollbackErr := m.executePreparedStatementsWithMap(ctx, req.RollbackStatements.Commands, queryMap)
+			if rollbackErr != nil {
+				return dbplugin.NewUserResponse{}, multierror.Append(createErr, rollbackErr)
+			}
+		}
+		return dbplugin.NewUserResponse{}, createErr
 	}
 
 	resp := dbplugin.NewUserResponse{
