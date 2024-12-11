@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	stdmysql "github.com/go-sql-driver/mysql"
+	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/go-secure-stdlib/strutil"
 	dbplugin "github.com/hashicorp/vault/sdk/database/dbplugin/v5"
 	"github.com/hashicorp/vault/sdk/database/helper/dbutil"
@@ -24,6 +25,9 @@ const (
 		ALTER USER '{{username}}'@'%' IDENTIFIED BY '{{password}}';
 	`
 
+	defaultMySQLRollbackStmt = `
+		DROP USER '{{username}}'@'%';
+	`
 	mySQLTypeName = "mysql"
 
 	DefaultUserNameTemplate       = `{{ printf "v-%s-%s-%s-%s" (.DisplayName | truncate 10) (.RoleName | truncate 10) (random 20) (unix_time) | truncate 32 }}`
@@ -130,8 +134,17 @@ func (m *MySQL) NewUser(ctx context.Context, req dbplugin.NewUserRequest) (dbplu
 		"expiration": expirationStr,
 	}
 
-	if err := m.executePreparedStatementsWithMap(ctx, req.Statements.Commands, queryMap); err != nil {
-		return dbplugin.NewUserResponse{}, err
+	createErr := m.executePreparedStatementsWithMap(ctx, req.Statements.Commands, queryMap)
+	if createErr != nil {
+		rollbackStmts := req.RollbackStatements.Commands
+		if len(rollbackStmts) == 0 {
+			rollbackStmts = []string{defaultMySQLRollbackStmt}
+		}
+		rollbackErr := m.executePreparedStatementsWithMap(ctx, rollbackStmts, queryMap)
+		if rollbackErr != nil {
+			return dbplugin.NewUserResponse{}, multierror.Append(createErr, rollbackErr)
+		}
+		return dbplugin.NewUserResponse{}, createErr
 	}
 
 	resp := dbplugin.NewUserResponse{
